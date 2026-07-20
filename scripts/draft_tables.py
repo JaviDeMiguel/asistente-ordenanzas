@@ -50,7 +50,13 @@ def main(argv: list[str] | None = None) -> int:
         "--paginas",
         default=None,
         help="Páginas (1-based) a analizar, separadas por comas. Si se omite, se "
-        "detectan automáticamente las que llevan una tabla numerada.",
+        "detectan automáticamente (leyenda «Tabla N» + páginas-imagen contiguas).",
+    )
+    parser.add_argument(
+        "--verificar",
+        action="store_true",
+        help="Transcribe cada tabla dos veces y reconcilia las lecturas "
+        "(verificación cruzada). Dobla el número de llamadas al modelo.",
     )
     args = parser.parse_args(argv)
 
@@ -62,7 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     drafter = TableDrafter(get_settings())
     try:
         resultado = drafter.draft_from_pdf(
-            args.pdf.read_bytes(), paginas=_parse_paginas(args.paginas)
+            args.pdf.read_bytes(),
+            paginas=_parse_paginas(args.paginas),
+            verificar=args.verificar,
         )
     except LLMConfigurationError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

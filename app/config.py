@@ -25,9 +25,13 @@ class Settings(BaseSettings):
 
     # --- Drafter de tablas por visión (herramienta offline) ---
     # Presupuesto de tokens y escala de render (≈ resolución) al transcribir una
-    # página-imagen con Claude. Solo lo usa `scripts/draft_tables.py`.
+    # región-imagen con Claude. Los márgenes (en puntos PDF) amplían el recorte de
+    # cada tabla: el superior es mayor para capturar la leyenda y las cabeceras que
+    # suelen ir sobre la rejilla. Solo lo usa `scripts/draft_tables.py`.
     drafter_max_tokens: int = 8192
     drafter_render_scale: float = 2.2
+    drafter_crop_margin_pt: float = 14.0
+    drafter_crop_margin_top_pt: float = 46.0
 
     # --- Base de datos (metadatos de las ordenanzas) ---
     db_path: str = "data/app.db"

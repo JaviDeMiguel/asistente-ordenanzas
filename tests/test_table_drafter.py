@@ -12,15 +12,22 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import Settings
+from app.models.schemas import TableRow, TableSpec
 from app.services.llm_service import LLMConfigurationError
 from app.services.table_drafter import (
+    TableDraft,
     TableDrafter,
+    _diff_specs,
     draft_tables,
+    expand_selection,
     find_table_pages,
+    looks_like_table,
+    merge_boxes,
     parse_table_drafts,
+    reconcile_drafts,
 )
 
-# --- Dobles del cliente de Anthropic -----------------------------------------
+# --- Datos y dobles ----------------------------------------------------------
 
 _TABLA_OK = {
     "tabla": "Tabla 1",
@@ -38,7 +45,11 @@ _TABLA_OK = {
 
 
 class _FakeMessages:
-    """Registra las llamadas y devuelve un JSON prefijado como bloque de texto."""
+    """Registra las llamadas y devuelve JSON prefijado como bloque de texto.
+
+    `payload` puede ser un dict/str fijo o una lista de payloads que se van
+    consumiendo en cada llamada (para simular pasadas de visión discrepantes).
+    """
 
     def __init__(self, payload) -> None:
         self._payload = payload
@@ -46,7 +57,10 @@ class _FakeMessages:
 
     def create(self, **kwargs) -> SimpleNamespace:
         self.calls.append(kwargs)
-        text = json.dumps(self._payload) if not isinstance(self._payload, str) else self._payload
+        payload = self._payload
+        if isinstance(payload, list):
+            payload = payload[min(len(self.calls) - 1, len(payload) - 1)]
+        text = payload if isinstance(payload, str) else json.dumps(payload)
         blocks = [SimpleNamespace(type="thinking", text="")]
         if text:
             blocks.append(SimpleNamespace(type="text", text=text))
@@ -60,6 +74,21 @@ class _FakeClient:
 
 def _settings() -> Settings:
     return Settings(anthropic_api_key=None, drafter_max_tokens=1024, drafter_render_scale=2.0)
+
+
+def _draft(*, tabla="Tabla 1", columnas=("Ln",), filas=(("res", ("55",)),), confianza="alta"):
+    return TableDraft(
+        spec=TableSpec(
+            tabla=tabla,
+            articulo="10",
+            descripcion="d",
+            columnas=list(columnas),
+            unidad="dB",
+            filas=[TableRow(clave=k, valores=list(v)) for k, v in filas],
+        ),
+        pagina=3,
+        confianza=confianza,
+    )
 
 
 # --- find_table_pages --------------------------------------------------------
@@ -76,6 +105,32 @@ def test_find_table_pages_detecta_solo_paginas_con_tabla_numerada():
 
 def test_find_table_pages_sin_tablas_devuelve_lista_vacia():
     assert find_table_pages(["texto sin tablas", "", None]) == []
+
+
+# --- looks_like_table / merge_boxes / expand_selection (geometría) -----------
+
+def test_looks_like_table():
+    assert looks_like_table(200, 50, 595) is True
+    assert looks_like_table(50, 50, 595) is False   # demasiado estrecha
+    assert looks_like_table(300, 10, 595) is False  # demasiado baja
+
+
+def test_merge_boxes_fusiona_cercanas_y_separa_lejanas():
+    # Dos cajas casi tocándose (hueco 1 pt) se fusionan con gap 6.
+    assert merge_boxes([(0, 0, 10, 10), (11, 0, 20, 10)], gap=6) == [(0, 0, 20, 10)]
+    # Con gap pequeño (0.5) el hueco de 1 pt las mantiene separadas.
+    assert sorted(merge_boxes([(0, 0, 10, 10), (11, 0, 20, 10)], gap=0.5)) == [
+        (0, 0, 10, 10),
+        (11, 0, 20, 10),
+    ]
+    # Cajas solapadas siempre se fusionan.
+    assert merge_boxes([(0, 0, 10, 10), (5, 5, 15, 15)], gap=0) == [(0, 0, 15, 15)]
+
+
+def test_expand_selection_une_leyenda_con_imagenes_contiguas():
+    # caption 0-based [2,3,4,6]; imagen [0,3,6,7,16] -> añade la 7 (junto a la 6),
+    # ignora la 0 (portada) y la 16 (anexo), lejos de toda leyenda.
+    assert expand_selection([2, 3, 4, 6], [0, 3, 6, 7, 16]) == [2, 3, 4, 6, 7]
 
 
 # --- parse_table_drafts ------------------------------------------------------
@@ -133,33 +188,106 @@ def test_parse_table_drafts_entrada_no_estructurada():
     assert avisos == []
 
 
+# --- reconcile_drafts (verificación cruzada) ---------------------------------
+
+def test_reconcile_drafts_sin_discrepancias_conserva_confianza():
+    d1, d2 = _draft(), _draft()
+    reconciliados, avisos = reconcile_drafts([[d1], [d2]], pagina=3)
+    assert avisos == []
+    assert reconciliados[0].confianza == "alta"
+
+
+def test_reconcile_drafts_discrepancia_de_valor_baja_confianza():
+    d1 = _draft(filas=(("res", ("55",)),))
+    d2 = _draft(filas=(("res", ("56",)),))  # una lectura distinta del mismo número
+    reconciliados, avisos = reconcile_drafts([[d1], [d2]], pagina=3)
+    assert reconciliados[0].confianza == "baja"
+    assert "discrepancia entre pasadas de visión" in reconciliados[0].nota
+    assert any("['55'] vs ['56']" in a for a in avisos)
+
+
+def test_reconcile_drafts_tabla_ausente_en_una_pasada():
+    d1 = _draft(tabla="Tabla 1")
+    reconciliados, avisos = reconcile_drafts([[d1], []], pagina=3)
+    assert reconciliados[0].confianza == "baja"
+    assert any("no la detectó" in a for a in avisos)
+
+
+def test_reconcile_drafts_tabla_solo_en_otra_pasada():
+    d1 = _draft(tabla="Tabla 1")
+    d2 = _draft(tabla="Tabla 2")
+    _, avisos = reconcile_drafts([[d1], [d1, d2]], pagina=3)
+    assert any("Tabla 2" in a and "solo la detectó" in a for a in avisos)
+
+
+def test_reconcile_drafts_sin_pasadas():
+    assert reconcile_drafts([], pagina=1) == ([], [])
+
+
+def test_diff_specs_reporta_columnas_y_filas_dispares():
+    a = _draft(columnas=("Ln",), filas=(("solo_a", ("1",)),)).spec
+    b = _draft(columnas=("Ld",), filas=(("solo_b", ("2",)),)).spec
+    difs = _diff_specs(a, b)
+    assert any("columnas" in d for d in difs)
+    assert any("solo_a" in d and "ausente" in d for d in difs)
+    assert any("solo_b" in d and "solo en otra" in d for d in difs)
+
+
 # --- draft_tables (orquestación) ---------------------------------------------
 
-def test_draft_tables_orquesta_con_dobles():
+def test_draft_tables_orquesta_regiones_y_paginas():
     render_calls: list[int] = []
 
-    def fake_render(idx: int) -> bytes:
+    def fake_render(idx: int) -> list[bytes]:
         render_calls.append(idx)
-        return b"PNG-FAKE"
+        return [b"PNG-A", b"PNG-B"]  # dos tablas (regiones) por página
 
     def fake_transcribe(png: bytes, idx: int):
-        assert png == b"PNG-FAKE"
-        return {"tablas": [{**_TABLA_OK, "articulo": str(idx)}]}
+        etiqueta = "Tabla A" if png == b"PNG-A" else "Tabla B"
+        return {"tablas": [{**_TABLA_OK, "tabla": etiqueta}]}
 
     resultado = draft_tables(
         indices=[1, 3],
-        render_page=fake_render,
+        render_regions=fake_render,
         transcribe_page=fake_transcribe,
     )
     assert render_calls == [1, 3]
     assert resultado.paginas == [2, 4]  # 1-based
-    assert [d.spec.articulo for d in resultado.borradores] == ["1", "3"]
+    assert [d.spec.tabla for d in resultado.borradores] == [
+        "Tabla A", "Tabla B", "Tabla A", "Tabla B",
+    ]
+
+
+def test_draft_tables_con_verificacion_marca_discrepancias():
+    # La misma región se transcribe dos veces con un valor distinto -> baja + aviso.
+    payloads = [
+        {"tablas": [{**_TABLA_OK, "filas": [{"clave": "res", "valores": ["55"]}],
+                     "columnas": ["Ln"]}]},
+        {"tablas": [{**_TABLA_OK, "filas": [{"clave": "res", "valores": ["56"]}],
+                     "columnas": ["Ln"]}]},
+    ]
+    contador = {"n": 0}
+
+    def fake_transcribe(png: bytes, idx: int):
+        payload = payloads[contador["n"] % 2]
+        contador["n"] += 1
+        return payload
+
+    resultado = draft_tables(
+        indices=[0],
+        render_regions=lambda i: [b"PNG"],
+        transcribe_page=fake_transcribe,
+        passes=2,
+    )
+    assert len(resultado.borradores) == 1
+    assert resultado.borradores[0].confianza == "baja"
+    assert any("discrepancia" in a for a in resultado.avisos)
 
 
 def test_result_to_document_incluye_tablas_listas_para_publicar():
     resultado = draft_tables(
         indices=[2],
-        render_page=lambda i: b"x",
+        render_regions=lambda i: [b"x"],
         transcribe_page=lambda png, i: {"tablas": [_TABLA_OK]},
     )
     doc = resultado.to_document()
@@ -181,14 +309,12 @@ def test_transcribe_page_usa_vision_y_devuelve_json():
     drafter = TableDrafter(_settings(), client=client)
     raw = drafter._transcribe_page(b"PNG", "Artículo 10 ... Tabla 1", 0)
     assert raw == {"tablas": [_TABLA_OK]}
-    # Se envió un bloque de imagen en base64 y salida estructurada.
     (call,) = client.messages.calls
     contenido = call["messages"][0]["content"]
     assert contenido[0]["type"] == "image"
     assert contenido[0]["source"]["media_type"] == "image/png"
     assert "output_config" in call and call["thinking"] == {"type": "adaptive"}
-    # El texto de la página se adjunta como contexto.
-    assert "Artículo 10" in contenido[1]["text"]
+    assert "Artículo 10" in contenido[1]["text"]  # el texto de la página va de contexto
 
 
 def test_transcribe_page_sin_texto_devuelve_tablas_vacias():
@@ -203,40 +329,32 @@ def test_get_client_sin_clave_lanza():
         drafter._get_client()
 
 
-def test_draft_from_pdf_detecta_paginas_y_transcribe(monkeypatch):
-    textos = [
-        "Portada",
-        "Artículo 10. Ver la Tabla 1.",
-        "Sin tablas",
-    ]
-    monkeypatch.setattr(
-        "app.services.table_drafter._extract_page_texts", lambda pdf: textos
-    )
+def test_draft_from_pdf_autoselecciona_paginas(monkeypatch):
+    textos = ["Portada", "Artículo 10. Ver la Tabla 1.", "Sin tablas"]
+    monkeypatch.setattr("app.services.table_drafter._extract_page_texts", lambda pdf: textos)
+    # La pág. 0-based 2 tiene imagen-tabla y es contigua a la 1 (con leyenda).
+    monkeypatch.setattr("app.services.table_drafter._image_table_pages", lambda pdf: [2])
     client = _FakeClient({"tablas": [_TABLA_OK]})
-    drafter = TableDrafter(
-        _settings(),
-        client=client,
-        render_page=lambda pdf, i, scale: b"PNG",
-    )
+    drafter = TableDrafter(_settings(), client=client, render_regions=lambda pdf, i: [b"PNG"])
     resultado = drafter.draft_from_pdf(b"%PDF-fake")
-    assert resultado.paginas == [2]  # solo la página con la Tabla 1
-    assert len(resultado.borradores) == 1
+    assert resultado.paginas == [2, 3]  # leyenda (pág.2) + imagen contigua (pág.3)
+    assert len(resultado.borradores) == 2
 
 
-def test_draft_from_pdf_respeta_paginas_forzadas(monkeypatch):
+def test_draft_from_pdf_paginas_forzadas_usa_render_por_defecto(monkeypatch):
     textos = ["p0", "p1", "p2", "p3"]
-    monkeypatch.setattr(
-        "app.services.table_drafter._extract_page_texts", lambda pdf: textos
-    )
+    monkeypatch.setattr("app.services.table_drafter._extract_page_texts", lambda pdf: textos)
+    # Cubre la rama de render por defecto (`_regions` sin inyectar) parcheando el
+    # renderizador de bajo nivel; el cliente de visión sigue siendo un doble.
     render_calls: list[int] = []
 
-    def fake_render(pdf, i, scale):
+    def fake_render_regions(pdf, i, *, scale, margin_side, margin_top):
         render_calls.append(i)
-        return b"PNG"
+        return [b"PNG"]
 
+    monkeypatch.setattr("app.services.table_drafter._render_regions", fake_render_regions)
     client = _FakeClient({"tablas": [_TABLA_OK]})
-    drafter = TableDrafter(_settings(), client=client, render_page=fake_render)
-    # Fuera de rango (99) se ignora; 3 -> índice 2.
-    resultado = drafter.draft_from_pdf(b"%PDF", paginas=[3, 99])
-    assert render_calls == [2]
+    drafter = TableDrafter(_settings(), client=client)  # sin render_regions inyectado
+    resultado = drafter.draft_from_pdf(b"%PDF", paginas=[3, 99])  # 99 fuera de rango
+    assert render_calls == [2]  # solo la pág. 3 (índice 2)
     assert resultado.paginas == [3]

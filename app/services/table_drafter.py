@@ -42,6 +42,15 @@ _SIN_DATO = "s/d"
 # Detecta el encabezado de una tabla numerada ("Tabla 1", "TABLA 5", "tabla nº 6").
 _CAPTION_RE = re.compile(r"tabla\s+n?[.ºo\s]*\d+", re.IGNORECASE)
 
+# Umbrales para tratar una imagen incrustada como tabla (y no como logo/firma):
+# ancho mínimo relativo al de la página y alto mínimo en puntos PDF.
+_MIN_TABLE_RATIO = 0.30
+_MIN_TABLE_HEIGHT_PT = 24.0
+# Solo se fusionan bboxes de imagen que casi se tocan (fragmentos de una misma
+# tabla). Un valor pequeño evita mezclar tablas contiguas en maquetas a 2 columnas
+# (el «canalón» entre columnas suele ser mayor que este umbral).
+_MERGE_GAP_PT = 6.0
+
 _SYSTEM_PROMPT = (
     "Eres un transcriptor meticuloso de tablas de ordenanzas municipales (BOP). "
     "Recibes la imagen de una página que contiene una o más tablas numeradas y, "
@@ -171,6 +180,77 @@ def find_table_pages(page_texts: list[str]) -> list[int]:
     return [i for i, texto in enumerate(page_texts) if _CAPTION_RE.search(texto or "")]
 
 
+def looks_like_table(width: float, height: float, page_width: float) -> bool:
+    """¿Una imagen incrustada tiene tamaño de tabla (no de logo/firma)?
+
+    Dimensiones en puntos PDF. Descarta banners e iconos: exige un ancho
+    relativo mínimo y un alto mínimo.
+    """
+    return width >= _MIN_TABLE_RATIO * page_width and height >= _MIN_TABLE_HEIGHT_PT
+
+
+def merge_boxes(
+    boxes: list[tuple[float, float, float, float]], *, gap: float = _MERGE_GAP_PT
+) -> list[tuple[float, float, float, float]]:
+    """Fusiona bboxes `(l, b, r, t)` que se solapan o casi se tocan (< `gap`).
+
+    Sirve para reunir los fragmentos-imagen de una misma tabla sin mezclar tablas
+    distintas (con `gap` pequeño, las columnas contiguas quedan separadas).
+    """
+    restantes = [tuple(b) for b in boxes]
+    fusionadas: list[tuple[float, float, float, float]] = []
+    while restantes:
+        actual = restantes.pop()
+        cambiado = True
+        while cambiado:
+            cambiado = False
+            for i, otra in enumerate(fusionadas):
+                if _boxes_close(actual, otra, gap):
+                    actual = (
+                        min(actual[0], otra[0]),
+                        min(actual[1], otra[1]),
+                        max(actual[2], otra[2]),
+                        max(actual[3], otra[3]),
+                    )
+                    fusionadas.pop(i)
+                    cambiado = True
+                    break
+        fusionadas.append(actual)
+    return fusionadas
+
+
+def _boxes_close(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+    gap: float,
+) -> bool:
+    """¿Dos bboxes `(l, b, r, t)` se solapan o quedan a menos de `gap`?"""
+    separadas = (
+        a[2] + gap < b[0]
+        or b[2] + gap < a[0]
+        or a[3] + gap < b[1]
+        or b[3] + gap < a[1]
+    )
+    return not separadas
+
+
+def expand_selection(
+    caption_pages: list[int], image_pages: list[int], *, radius: int = 1
+) -> list[int]:
+    """Une las páginas con leyenda de tabla y las páginas-imagen cercanas a ellas.
+
+    Una tabla puede ir incrustada como imagen en una página cuya capa de texto no
+    dice «Tabla N» (la leyenda está en la página anterior). Se añaden esas
+    páginas-imagen solo si están a `radius` páginas de una con leyenda, para no
+    colar portadas ni anexos con imágenes decorativas.
+    """
+    seleccion = set(caption_pages)
+    for p in image_pages:
+        if any(abs(p - c) <= radius for c in caption_pages):
+            seleccion.add(p)
+    return sorted(seleccion)
+
+
 def parse_table_drafts(raw: object, *, pagina: int) -> tuple[list[TableDraft], list[str]]:
     """Valida la respuesta del modelo (una página) en borradores `TableSpec`.
 
@@ -240,26 +320,108 @@ def parse_table_drafts(raw: object, *, pagina: int) -> tuple[list[TableDraft], l
     return borradores, avisos
 
 
+def _diff_specs(a: TableSpec, b: TableSpec) -> list[str]:
+    """Diferencias legibles entre dos transcripciones de la misma tabla."""
+    difs: list[str] = []
+    if a.columnas != b.columnas:
+        difs.append(f"columnas {a.columnas} vs {b.columnas}")
+    amap = {f.clave: f.valores for f in a.filas}
+    bmap = {f.clave: f.valores for f in b.filas}
+    for clave, va in amap.items():
+        vb = bmap.get(clave)
+        if vb is None:
+            difs.append(f"fila «{clave}» ausente en otra pasada")
+        elif va != vb:
+            difs.append(f"fila «{clave}»: {va} vs {vb}")
+    for clave in bmap:
+        if clave not in amap:
+            difs.append(f"fila «{clave}» solo en otra pasada")
+    return difs
+
+
+def reconcile_drafts(
+    pasadas: list[list[TableDraft]], *, pagina: int
+) -> tuple[list[TableDraft], list[str]]:
+    """Cruza varias transcripciones de la misma región y marca discrepancias.
+
+    Toma los borradores de cada pasada de visión (misma imagen, transcrita N
+    veces), los empareja por etiqueta de tabla y compara celda a celda. Cualquier
+    desacuerdo baja la confianza a «baja» y genera un aviso con el detalle: para
+    un umbral legal, dos lecturas distintas del mismo número son justo lo que hay
+    que revisar antes de publicar.
+    """
+    if not pasadas:
+        return [], []
+    por_etiqueta = [{d.spec.tabla: d for d in pasada} for pasada in pasadas]
+    reconciliados: list[TableDraft] = []
+    avisos: list[str] = []
+
+    for etiqueta, base in por_etiqueta[0].items():
+        conflictos: list[str] = []
+        for j in range(1, len(pasadas)):
+            otra = por_etiqueta[j].get(etiqueta)
+            if otra is None:
+                conflictos.append(f"la pasada {j + 1} no la detectó")
+                continue
+            conflictos.extend(_diff_specs(base.spec, otra.spec))
+        if conflictos:
+            nota = f"{base.nota} [discrepancia entre pasadas de visión]".strip()
+            reconciliados.append(
+                TableDraft(spec=base.spec, pagina=base.pagina, confianza="baja", nota=nota)
+            )
+            avisos.append(
+                f"Página {pagina}, {etiqueta}: discrepancia entre pasadas — "
+                + "; ".join(conflictos[:6])
+                + " — verificar."
+            )
+        else:
+            reconciliados.append(base)
+
+    for j in range(1, len(pasadas)):
+        for etiqueta in por_etiqueta[j]:
+            if etiqueta not in por_etiqueta[0]:
+                avisos.append(
+                    f"Página {pagina}, {etiqueta}: solo la detectó la pasada "
+                    f"{j + 1}; revisar."
+                )
+    return reconciliados, avisos
+
+
 def draft_tables(
     *,
     indices: list[int],
-    render_page: Callable[[int], bytes],
+    render_regions: Callable[[int], list[bytes]],
     transcribe_page: Callable[[bytes, int], object],
+    passes: int = 1,
 ) -> TableDraftResult:
     """Orquesta el borrado de tablas sobre un conjunto de páginas.
 
-    Cada página se renderiza (`render_page`) y se transcribe (`transcribe_page`),
-    y su JSON se valida en borradores. Las dependencias de render y de red se
+    De cada página se obtienen una o varias **regiones-imagen** (`render_regions`,
+    un recorte por tabla) y cada región se transcribe (`transcribe_page`). Con
+    `passes > 1` cada región se transcribe varias veces y se reconcilian las
+    lecturas (verificación cruzada). Las dependencias de render y de red se
     inyectan, de modo que la orquestación es comprobable sin PDF ni API real.
     """
     borradores: list[TableDraft] = []
     avisos: list[str] = []
     for idx in indices:
-        png = render_page(idx)
-        raw = transcribe_page(png, idx)
-        pagina_borradores, pagina_avisos = parse_table_drafts(raw, pagina=idx + 1)
-        borradores.extend(pagina_borradores)
-        avisos.extend(pagina_avisos)
+        for region_png in render_regions(idx):
+            resultados = [
+                parse_table_drafts(transcribe_page(region_png, idx), pagina=idx + 1)
+                for _ in range(passes)
+            ]
+            if passes > 1:
+                borradores_base, avisos_base = resultados[0]
+                reconciliados, avisos_verif = reconcile_drafts(
+                    [r[0] for r in resultados], pagina=idx + 1
+                )
+                borradores.extend(reconciliados)
+                avisos.extend(avisos_base)
+                avisos.extend(avisos_verif)
+            else:
+                region_borradores, region_avisos = resultados[0]
+                borradores.extend(region_borradores)
+                avisos.extend(region_avisos)
     return TableDraftResult(
         borradores=borradores,
         avisos=avisos,
@@ -275,16 +437,87 @@ def _extract_page_texts(pdf_bytes: bytes) -> list[str]:  # pragma: no cover
     return [(page.extract_text() or "") for page in reader.pages]
 
 
-def _render_page_png(pdf_bytes: bytes, index: int, scale: float) -> bytes:  # pragma: no cover
-    """Renderiza una página del PDF a PNG con `pypdfium2` (import perezoso)."""
+def _image_table_pages(pdf_bytes: bytes) -> list[int]:  # pragma: no cover
+    """Índices (0-based) de páginas con al menos una imagen con pinta de tabla."""
     import pypdfium2 as pdfium
+    import pypdfium2.raw as pdfium_c
 
     pdf = pdfium.PdfDocument(pdf_bytes)
     try:
-        image = pdf[index].render(scale=scale).to_pil()
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        return buffer.getvalue()
+        paginas: list[int] = []
+        for i in range(len(pdf)):
+            page = pdf[i]
+            page_width, _ = page.get_size()
+            for obj in page.get_objects():
+                if obj.type == pdfium_c.FPDF_PAGEOBJ_IMAGE:
+                    left, bottom, right, top = obj.get_bounds()
+                    if looks_like_table(right - left, top - bottom, page_width):
+                        paginas.append(i)
+                        break
+        return paginas
+    finally:
+        pdf.close()
+
+
+def _render_regions(
+    pdf_bytes: bytes,
+    index: int,
+    *,
+    scale: float,
+    margin_side: float,
+    margin_top: float,
+) -> list[bytes]:  # pragma: no cover
+    """Recorta cada región-tabla de una página a PNG (`pypdfium2` + `Pillow`).
+
+    Detecta las imágenes con pinta de tabla, fusiona las que son fragmentos de una
+    misma tabla y devuelve un recorte por tabla (con margen, más amplio arriba para
+    la leyenda). Si la página no tiene imágenes-tabla, devuelve la página entera.
+    """
+    import math
+
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as pdfium_c
+
+    pdf = pdfium.PdfDocument(pdf_bytes)
+    try:
+        page = pdf[index]
+        page_width, page_height = page.get_size()
+        image = page.render(scale=scale).to_pil()
+        scale_x, scale_y = image.width / page_width, image.height / page_height
+
+        boxes: list[tuple[float, float, float, float]] = []
+        for obj in page.get_objects():
+            if obj.type == pdfium_c.FPDF_PAGEOBJ_IMAGE:
+                left, bottom, right, top = obj.get_bounds()
+                if looks_like_table(right - left, top - bottom, page_width):
+                    boxes.append((left, bottom, right, top))
+
+        if not boxes:
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            return [buffer.getvalue()]
+
+        boxes = merge_boxes(boxes)
+        boxes.sort(key=lambda bx: (-bx[3], bx[0]))  # orden de lectura aproximado
+
+        crops: list[bytes] = []
+        for left, bottom, right, top in boxes:
+            l2 = max(0.0, left - margin_side)
+            b2 = max(0.0, bottom - margin_side)
+            r2 = min(page_width, right + margin_side)
+            t2 = min(page_height, top + margin_top)
+            recorte = image.crop(
+                (
+                    int(l2 * scale_x),
+                    int((page_height - t2) * scale_y),
+                    math.ceil(r2 * scale_x),
+                    math.ceil((page_height - b2) * scale_y),
+                )
+            )
+            buffer = io.BytesIO()
+            recorte.save(buffer, format="PNG")
+            crops.append(buffer.getvalue())
+        return crops
     finally:
         pdf.close()
 
@@ -301,11 +534,23 @@ class TableDrafter:
         settings: Settings,
         *,
         client: object | None = None,
-        render_page: Callable[[bytes, int, float], bytes] | None = None,
+        render_regions: Callable[[bytes, int], list[bytes]] | None = None,
     ) -> None:
         self._settings = settings
         self._client = client
-        self._render_page = render_page or _render_page_png
+        self._render_regions = render_regions
+
+    def _regions(self, pdf_bytes: bytes, index: int) -> list[bytes]:
+        """Recortes-imagen de una página (adaptador inyectable en tests)."""
+        if self._render_regions is not None:
+            return self._render_regions(pdf_bytes, index)
+        return _render_regions(
+            pdf_bytes,
+            index,
+            scale=self._settings.drafter_render_scale,
+            margin_side=self._settings.drafter_crop_margin_pt,
+            margin_top=self._settings.drafter_crop_margin_top_pt,
+        )
 
     def _get_client(self) -> object:
         """Devuelve el cliente de Anthropic (perezoso; exige `ANTHROPIC_API_KEY`)."""
@@ -362,24 +607,32 @@ class TableDrafter:
         return json.loads(texto)
 
     def draft_from_pdf(
-        self, pdf_bytes: bytes, *, paginas: list[int] | None = None
+        self,
+        pdf_bytes: bytes,
+        *,
+        paginas: list[int] | None = None,
+        verificar: bool = False,
     ) -> TableDraftResult:
         """Genera borradores de tablas para un PDF.
 
         Args:
             pdf_bytes: Contenido del PDF.
             paginas: Números de página (1-based) a analizar. Si es `None`, se
-                detectan automáticamente las páginas con tablas numeradas.
+                detectan automáticamente (páginas con leyenda «Tabla N» más las
+                páginas-imagen contiguas a ellas).
+            verificar: Si es `True`, transcribe cada región dos veces y reconcilia
+                las lecturas (verificación cruzada); dobla el coste en llamadas.
         """
         page_texts = _extract_page_texts(pdf_bytes)
         if paginas is not None:
             indices = sorted({p - 1 for p in paginas if 1 <= p <= len(page_texts)})
         else:
-            indices = find_table_pages(page_texts)
+            indices = expand_selection(
+                find_table_pages(page_texts), _image_table_pages(pdf_bytes)
+            )
         return draft_tables(
             indices=indices,
-            render_page=lambda i: self._render_page(
-                pdf_bytes, i, self._settings.drafter_render_scale
-            ),
+            render_regions=lambda i: self._regions(pdf_bytes, i),
             transcribe_page=lambda png, i: self._transcribe_page(png, page_texts[i], i),
+            passes=2 if verificar else 1,
         )
