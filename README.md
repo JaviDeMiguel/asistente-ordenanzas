@@ -67,6 +67,21 @@ La transcripción estructurada de las tablas de la ordenanza acústica está en
 [`examples/tablas_acustica.py`](examples/tablas_acustica.py) (verifica los
 valores contra el original antes de producción).
 
+Transcribirlas a mano es tedioso, así que hay un **drafter asistido por visión**
+([`scripts/draft_tables.py`](scripts/draft_tables.py)): detecta las páginas con
+una tabla numerada, las **renderiza a imagen** y se las pasa a **Claude (visión)**
+para que las transcriba a un **borrador** `TableSpec` en JSON. La salida no se
+indexa: es un borrador para que un humano **verifique los valores** antes de
+publicarlos (para un umbral legal, un número mal leído es peor que no responder;
+por eso el modelo marca la `confianza` y avisa de las celdas dudosas o
+desalineadas).
+
+```bash
+pip install -r requirements-drafter.txt   # pypdfium2 + Pillow (solo para el drafter)
+python scripts/draft_tables.py Ordenanza-Acustica.pdf   # requiere ANTHROPIC_API_KEY
+# → Ordenanza-Acustica.tablas.json  (revisa `tablas` y publícalas con el alta)
+```
+
 ## Características
 
 - **Ingesta** de ordenanzas desde **texto plano** o **PDF** (con limpieza de las
@@ -107,10 +122,14 @@ app/
 │   ├── ingest_service.py       # Orquestación de la ingesta
 │   ├── qa_service.py           # Orquestación del RAG (recuperar → responder)
 │   ├── embedding_service.py    # Proveedor de embeddings (local / Voyage)
+│   ├── table_drafter.py        # Borrador de tablas por visión (Claude)
 │   └── llm_service.py          # Claude con prompt citador
 └── repositories/
     ├── ordinance_repository.py # Metadatos de ordenanzas (SQLite)
     └── vector_store.py         # Artículos + embeddings + metadatos (Chroma)
+
+scripts/
+└── draft_tables.py             # CLI: PDF → borrador de tablas (visión) para revisar
 ```
 
 ## Endpoints
@@ -188,11 +207,12 @@ y la base vectorial se fuerzan a memoria.
 
 ## Limitaciones y hoja de ruta
 
-- **Tablas: extracción automática.** Las tablas se ingieren de forma estructurada
-  (resuelto), pero transcribirlas a mano es tedioso. Como van incrustadas como
-  imágenes, la vía de automatización realista es **OCR/visión** (renderizar la
-  región de la tabla y transcribirla con un modelo de visión) generando un
-  **borrador que un humano verifica** antes de indexar. *Roadmap.*
+- **Tablas: extracción automática (visión).** Como van incrustadas como imágenes,
+  hay un drafter que **renderiza las páginas y las transcribe con Claude (visión)**
+  a un borrador `TableSpec` para revisión humana
+  ([`scripts/draft_tables.py`](scripts/draft_tables.py)). Pendiente: recortar la
+  región exacta de la tabla (hoy se envía la página entera) y una segunda pasada
+  de verificación cruzada del borrador.
 - **Parser heurístico.** El troceado está afinado para el formato del BOP de
   Toledo (numeración secuencial de artículos). Ante un articulado sin estructura
   reconocible, el sistema recurre a un troceado por palabras (degradación

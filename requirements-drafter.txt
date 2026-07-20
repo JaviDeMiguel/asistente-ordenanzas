@@ -1,0 +1,6 @@
+# Dependencias SOLO para el drafter de tablas por visión (scripts/draft_tables.py).
+# No forman parte del runtime de la API: renderizan el PDF a imagen para pasarlo
+# a Claude (visión). Instálalas aparte cuando vayas a generar borradores de tablas.
+-r requirements.txt
+pypdfium2>=4.30
+Pillow>=10.0

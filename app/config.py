@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-opus-4-8"
     max_answer_tokens: int = 2048
 
+    # --- Drafter de tablas por visión (herramienta offline) ---
+    # Presupuesto de tokens y escala de render (≈ resolución) al transcribir una
+    # página-imagen con Claude. Solo lo usa `scripts/draft_tables.py`.
+    drafter_max_tokens: int = 8192
+    drafter_render_scale: float = 2.2
+
     # --- Base de datos (metadatos de las ordenanzas) ---
     db_path: str = "data/app.db"
 
