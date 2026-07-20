@@ -1,0 +1,35 @@
+# Configuración de herramientas del proyecto (pytest + cobertura + ruff).
+# El proyecto se gestiona con requirements.txt; este archivo solo agrupa la
+# configuración de las herramientas de desarrollo.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=85"
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/__init__.py"]
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM"]
+
+# Los `Depends`/`Query`/... de FastAPI en argumentos por defecto son el idioma
+# correcto del framework, no el antipatrón que detecta B008.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Header",
+    "fastapi.Security",
+]
