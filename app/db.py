@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS ordenanzas (
     titulo         TEXT NOT NULL,
     fuente         TEXT,
     articulo_count INTEGER NOT NULL DEFAULT 0,
+    tabla_count    INTEGER NOT NULL DEFAULT 0,
     chunk_count    INTEGER NOT NULL DEFAULT 0,
     char_count     INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL

@@ -4,6 +4,62 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+# --- Tablas ------------------------------------------------------------------
+
+class TableRow(BaseModel):
+    """Una fila de una tabla: una clave y sus valores alineados con las columnas."""
+
+    clave: str = Field(
+        ...,
+        min_length=1,
+        description="Etiqueta de la fila (p. ej. 'Uso residencial').",
+    )
+    valores: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Valores de la fila, en el mismo orden que `columnas`.",
+    )
+
+
+class TableSpec(BaseModel):
+    """Tabla estructurada asociada a un artículo de una ordenanza.
+
+    Las tablas de las ordenanzas del BOP suelen ir **incrustadas como imágenes**,
+    por lo que no se pueden extraer del PDF con herramientas de texto. Se ingieren
+    de forma estructurada (valores verificados) y se linealizan a filas citables.
+    """
+
+    tabla: str = Field(
+        ...,
+        min_length=1,
+        max_length=120,
+        description="Etiqueta de la tabla (p. ej. 'Tabla 1').",
+    )
+    articulo: str = Field(
+        ...,
+        min_length=1,
+        max_length=20,
+        description="Número del artículo al que pertenece la tabla (p. ej. '10').",
+    )
+    descripcion: str = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="Descripción / título de la tabla.",
+    )
+    columnas: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Etiquetas de las columnas de valores (p. ej. 'Ln (noche)').",
+    )
+    unidad: str = Field(
+        default="",
+        max_length=30,
+        description="Unidad de los valores (p. ej. 'dB'), opcional.",
+    )
+    filas: list[TableRow] = Field(..., min_length=1)
+
+
 # --- Ingesta de ordenanzas ---------------------------------------------------
 
 class OrdinanceIngestRequest(BaseModel):
@@ -26,6 +82,10 @@ class OrdinanceIngestRequest(BaseModel):
         max_length=300,
         description="Referencia de publicación (p. ej. 'BOP Toledo nº 45, 25/02/2013').",
     )
+    tablas: list[TableSpec] = Field(
+        default_factory=list,
+        description="Tablas estructuradas de la ordenanza (opcional).",
+    )
 
 
 class OrdinanceSummary(BaseModel):
@@ -35,6 +95,7 @@ class OrdinanceSummary(BaseModel):
     titulo: str
     fuente: str | None = None
     articulo_count: int = Field(..., description="Número de artículos detectados.")
+    tabla_count: int = Field(0, description="Número de tablas estructuradas indexadas.")
     chunk_count: int = Field(..., description="Número de fragmentos indexados.")
     char_count: int = Field(..., description="Longitud del texto en caracteres.")
     created_at: datetime
@@ -64,12 +125,14 @@ class QuestionRequest(BaseModel):
 
 
 class Cita(BaseModel):
-    """Fragmento de un artículo usado como fuente de la respuesta."""
+    """Fragmento de un artículo (o de una tabla) usado como fuente."""
 
     ordenanza_id: str
     ordenanza_titulo: str
+    tipo: str = Field("articulo", description="Tipo de fuente: 'articulo' o 'tabla'.")
     articulo: str = Field(..., description="Número del artículo, p. ej. '23'.")
-    epigrafe: str = Field("", description="Título del artículo.")
+    tabla: str = Field("", description="Etiqueta de la tabla, si la fuente es una tabla.")
+    epigrafe: str = Field("", description="Título del artículo o descripción de la tabla.")
     titulo: str = Field("", description="Título (jerárquico) contenedor.")
     capitulo: str = Field("", description="Capítulo contenedor.")
     seccion: str = Field("", description="Sección contenedora.")

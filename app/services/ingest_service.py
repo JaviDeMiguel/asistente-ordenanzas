@@ -15,6 +15,7 @@ from fastapi import Depends
 from pypdf import PdfReader
 
 from app.config import Settings, get_settings
+from app.models.schemas import TableSpec
 from app.repositories.ordinance_repository import (
     OrdinanceRecord,
     OrdinanceRepository,
@@ -27,6 +28,7 @@ from app.repositories.vector_store import (
 )
 from app.services.embedding_service import EmbeddingProvider, get_embedding_provider
 from app.services.ordinance_parser import ParsedArticle, parse_ordinance
+from app.services.table_service import TableFragment, linearize_table
 from app.services.text_utils import clean_boletin_text, split_words
 
 
@@ -50,58 +52,93 @@ class IngestService:
         self._embeddings = embedding_provider
 
     def ingest_text(
-        self, *, titulo: str, contenido: str, fuente: str | None = None
+        self,
+        *,
+        titulo: str,
+        contenido: str,
+        fuente: str | None = None,
+        tablas: list[TableSpec] | None = None,
     ) -> OrdinanceRecord:
-        """Trocea, vectoriza y almacena una ordenanza a partir de texto plano."""
+        """Trocea, vectoriza y almacena una ordenanza (artículos + tablas)."""
         text = contenido.strip()
         if not text:
             raise EmptyOrdinanceError("La ordenanza está vacía.")
 
-        fragments = parse_ordinance(
+        articles = parse_ordinance(
             text,
             max_words=self._settings.article_max_words,
             overlap=self._settings.article_overlap,
         )
-        if not fragments:
-            fragments = self._fallback_fragments(text)
-        if not fragments:
+        if not articles:
+            articles = self._fallback_fragments(text)
+
+        tablas = tablas or []
+        table_frags = [frag for spec in tablas for frag in linearize_table(spec)]
+        if not articles and not table_frags:
             raise EmptyOrdinanceError("No se pudo fragmentar la ordenanza.")
 
-        articulo_count = len({frag.numero for frag in fragments})
         record = self._repository.add(
             titulo=titulo,
             fuente=fuente,
-            articulo_count=articulo_count,
-            chunk_count=len(fragments),
+            articulo_count=len({a.numero for a in articles}),
+            tabla_count=len(tablas),
+            chunk_count=len(articles) + len(table_frags),
             char_count=len(text),
         )
 
-        embed_texts = [self._embed_text(titulo, frag) for frag in fragments]
+        embed_texts = [self._embed_text(titulo, a) for a in articles]
+        embed_texts += [self._embed_text_tabla(titulo, t) for t in table_frags]
         embeddings = self._embeddings.embed_documents(embed_texts)
-        chunks = [
-            StoredChunk(
-                ordenanza_id=record.id,
-                ordenanza_titulo=titulo,
-                articulo=frag.numero,
-                epigrafe=frag.epigrafe,
-                titulo=frag.titulo,
-                capitulo=frag.capitulo,
-                seccion=frag.seccion,
-                parte=frag.parte,
-                texto=frag.texto,
-                embedding=embedding,
+
+        chunks: list[StoredChunk] = []
+        for a, emb in zip(articles, embeddings[: len(articles)], strict=True):
+            chunks.append(
+                StoredChunk(
+                    ordenanza_id=record.id,
+                    ordenanza_titulo=titulo,
+                    articulo=a.numero,
+                    epigrafe=a.epigrafe,
+                    titulo=a.titulo,
+                    capitulo=a.capitulo,
+                    seccion=a.seccion,
+                    parte=a.parte,
+                    texto=a.texto,
+                    embedding=emb,
+                )
             )
-            for frag, embedding in zip(fragments, embeddings, strict=True)
-        ]
+        for t, emb in zip(table_frags, embeddings[len(articles):], strict=True):
+            chunks.append(
+                StoredChunk(
+                    ordenanza_id=record.id,
+                    ordenanza_titulo=titulo,
+                    articulo=t.articulo,
+                    epigrafe=t.epigrafe,
+                    titulo="",
+                    capitulo="",
+                    seccion="",
+                    parte=t.fila,
+                    texto=t.texto,
+                    embedding=emb,
+                    tipo="tabla",
+                    tabla=t.tabla,
+                )
+            )
         self._vectors.add(chunks)
         return record
 
     def ingest_pdf(
-        self, *, titulo: str, pdf_bytes: bytes, fuente: str | None = None
+        self,
+        *,
+        titulo: str,
+        pdf_bytes: bytes,
+        fuente: str | None = None,
+        tablas: list[TableSpec] | None = None,
     ) -> OrdinanceRecord:
         """Extrae el texto de un PDF y lo da de alta como ordenanza."""
         text = self._extract_pdf_text(pdf_bytes)
-        return self.ingest_text(titulo=titulo, contenido=text, fuente=fuente)
+        return self.ingest_text(
+            titulo=titulo, contenido=text, fuente=fuente, tablas=tablas
+        )
 
     def delete_ordinance(self, ordenanza_id: str) -> bool:
         """Elimina una ordenanza (metadatos + vectores). `True` si existía."""
@@ -117,6 +154,14 @@ class IngestService:
         if frag.epigrafe:
             etiqueta += f": {frag.epigrafe}"
         return f"{etiqueta}\n{frag.texto}"
+
+    @staticmethod
+    def _embed_text_tabla(titulo: str, frag: TableFragment) -> str:
+        """Texto que se vectoriza para una fila de tabla: etiqueta + fila."""
+        return (
+            f"{titulo}. {frag.tabla} (Artículo {frag.articulo}) — "
+            f"{frag.epigrafe}\n{frag.texto}"
+        )
 
     def _fallback_fragments(self, text: str) -> list[ParsedArticle]:
         """Troceado por palabras cuando no se detecta estructura de articulado."""

@@ -27,7 +27,7 @@ _CHROMA_SETTINGS = ChromaSettings(anonymized_telemetry=False)
 
 @dataclass
 class StoredChunk:
-    """Fragmento de artículo con su vector de embedding y sus metadatos."""
+    """Fragmento (de artículo o de tabla) con su embedding y sus metadatos."""
 
     ordenanza_id: str
     ordenanza_titulo: str
@@ -39,11 +39,13 @@ class StoredChunk:
     parte: int
     texto: str
     embedding: list[float]
+    tipo: str = "articulo"  # "articulo" | "tabla"
+    tabla: str = ""
 
 
 @dataclass
 class ArticleHit:
-    """Artículo recuperado en una búsqueda por similitud."""
+    """Fragmento (artículo o tabla) recuperado en una búsqueda por similitud."""
 
     ordenanza_id: str
     ordenanza_titulo: str
@@ -54,6 +56,8 @@ class ArticleHit:
     seccion: str
     texto: str
     score: float
+    tipo: str = "articulo"
+    tabla: str = ""
 
 
 class ArticleVectorStore:
@@ -82,14 +86,21 @@ class ArticleVectorStore:
         if not chunks:
             return
         self._collection.add(
-            ids=[f"{c.ordenanza_id}:{c.articulo}:{c.parte}" for c in chunks],
+            # El id incluye tipo y tabla para que una fila de tabla asociada al
+            # artículo N no colisione con el propio artículo N.
+            ids=[
+                f"{c.ordenanza_id}:{c.tipo}:{c.tabla or c.articulo}:{c.parte}"
+                for c in chunks
+            ],
             embeddings=[c.embedding for c in chunks],
             documents=[c.texto for c in chunks],
             metadatas=[
                 {
                     "ordenanza_id": c.ordenanza_id,
                     "ordenanza_titulo": c.ordenanza_titulo,
+                    "tipo": c.tipo,
                     "articulo": c.articulo,
+                    "tabla": c.tabla,
                     "epigrafe": c.epigrafe,
                     "titulo": c.titulo,
                     "capitulo": c.capitulo,
@@ -137,6 +148,8 @@ class ArticleVectorStore:
                 seccion=str(meta.get("seccion", "")),
                 texto=texto,
                 score=1.0 - float(distance),
+                tipo=str(meta.get("tipo", "articulo")),
+                tabla=str(meta.get("tabla", "")),
             )
             for texto, meta, distance in zip(
                 documents, metadatas, distances, strict=True

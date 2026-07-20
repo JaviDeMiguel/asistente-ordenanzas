@@ -22,6 +22,7 @@ class OrdinanceRecord:
     titulo: str
     fuente: str | None
     articulo_count: int
+    tabla_count: int
     chunk_count: int
     char_count: int
     created_at: str
@@ -39,6 +40,7 @@ class OrdinanceRepository:
         titulo: str,
         fuente: str | None,
         articulo_count: int,
+        tabla_count: int,
         chunk_count: int,
         char_count: int,
     ) -> OrdinanceRecord:
@@ -48,18 +50,21 @@ class OrdinanceRepository:
             titulo=titulo,
             fuente=fuente,
             articulo_count=articulo_count,
+            tabla_count=tabla_count,
             chunk_count=chunk_count,
             char_count=char_count,
             created_at=datetime.now(UTC).isoformat(),
         )
         self._db.execute(
             "INSERT INTO ordenanzas (id, titulo, fuente, articulo_count, "
-            "chunk_count, char_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "tabla_count, chunk_count, char_count, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.id,
                 record.titulo,
                 record.fuente,
                 record.articulo_count,
+                record.tabla_count,
                 record.chunk_count,
                 record.char_count,
                 record.created_at,
@@ -70,16 +75,16 @@ class OrdinanceRepository:
     def list_all(self) -> list[OrdinanceRecord]:
         """Lista todas las ordenanzas indexadas (más recientes primero)."""
         rows = self._db.query_all(
-            "SELECT id, titulo, fuente, articulo_count, chunk_count, char_count, "
-            "created_at FROM ordenanzas ORDER BY created_at DESC"
+            "SELECT id, titulo, fuente, articulo_count, tabla_count, chunk_count, "
+            "char_count, created_at FROM ordenanzas ORDER BY created_at DESC"
         )
         return [self._to_record(row) for row in rows]
 
     def get(self, ordenanza_id: str) -> OrdinanceRecord | None:
         """Recupera una ordenanza por su id, o `None` si no existe."""
         row = self._db.query_one(
-            "SELECT id, titulo, fuente, articulo_count, chunk_count, char_count, "
-            "created_at FROM ordenanzas WHERE id = ?",
+            "SELECT id, titulo, fuente, articulo_count, tabla_count, chunk_count, "
+            "char_count, created_at FROM ordenanzas WHERE id = ?",
             (ordenanza_id,),
         )
         return self._to_record(row) if row is not None else None
@@ -98,6 +103,7 @@ class OrdinanceRepository:
             titulo=row["titulo"],
             fuente=row["fuente"],
             articulo_count=row["articulo_count"],
+            tabla_count=row["tabla_count"],
             chunk_count=row["chunk_count"],
             char_count=row["char_count"],
             created_at=row["created_at"],

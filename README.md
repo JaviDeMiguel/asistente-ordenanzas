@@ -42,10 +42,36 @@ decisiones diferencian este proyecto de un RAG genérico:
    recomienda **Voyage AI** (`EMBEDDING_PROVIDER=voyage`), semántico y sin tocar
    el resto de la app.
 
+### Tablas (los valores por celda)
+
+Muchas preguntas reales van sobre **tablas** (p. ej. «¿límite de ruido en zona
+residencial de noche?»). En las ordenanzas del BOP esas tablas van **incrustadas
+como imágenes**: la capa de texto contiene la leyenda («Tabla 1») pero **no los
+valores** (`65 65 55` no aparece en el texto), así que ni pypdf ni pdfplumber
+pueden extraerlas. Y para un umbral legal, una lectura automática errónea es peor
+que no responder.
+
+Por eso las tablas se ingieren de forma **estructurada** (valores verificados,
+campo `tablas` del alta) y se **linealizan a una fila autodescriptiva por
+registro**, con el periodo y la unidad explícitos y su artículo asociado. Así la
+recuperación funciona en lenguaje natural y la respuesta cita «Tabla 1 (Art.
+10)». Ejemplo real (proveedor local, sin clave):
+
+```
+Pregunta: "¿límite de ruido en zona residencial por la noche?"
+→ [tabla] Tabla 1 · Art. 10 : Sectores … uso residencial: Ld (día) 65 dB;
+                              Le (tarde) 65 dB; Ln (noche) 55 dB.
+```
+
+La transcripción estructurada de las tablas de la ordenanza acústica está en
+[`examples/tablas_acustica.py`](examples/tablas_acustica.py) (verifica los
+valores contra el original antes de producción).
+
 ## Características
 
 - **Ingesta** de ordenanzas desde **texto plano** o **PDF** (con limpieza de las
   cabeceras/pies que el BOP repite en cada página).
+- **Tablas estructuradas** linealizadas a filas citables y recuperables.
 - **Troceado por artículo** con contexto jerárquico y metadatos.
 - **Base vectorial** (**ChromaDB**, índice HNSW por coseno) y **SQLite** para los
   metadatos de cada ordenanza.
@@ -162,10 +188,11 @@ y la base vectorial se fuerzan a memoria.
 
 ## Limitaciones y hoja de ruta
 
-- **Tablas.** La extracción de PDF (pypdf) no conserva las tablas (p. ej. los
-  límites de ruido por zona y periodo de una ordenanza de contaminación
-  acústica). Preguntas sobre esos valores no funcionarán bien hasta añadir un
-  parser de tablas (pdfplumber/camelot). *Pendiente.*
+- **Tablas: extracción automática.** Las tablas se ingieren de forma estructurada
+  (resuelto), pero transcribirlas a mano es tedioso. Como van incrustadas como
+  imágenes, la vía de automatización realista es **OCR/visión** (renderizar la
+  región de la tabla y transcribirla con un modelo de visión) generando un
+  **borrador que un humano verifica** antes de indexar. *Roadmap.*
 - **Parser heurístico.** El troceado está afinado para el formato del BOP de
   Toledo (numeración secuencial de artículos). Ante un articulado sin estructura
   reconocible, el sistema recurre a un troceado por palabras (degradación

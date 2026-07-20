@@ -101,11 +101,19 @@ class QAService:
     def _context_block(hit: ArticleHit) -> str:
         """Bloque de contexto etiquetado que ve el LLM (para poder citar)."""
         cabecera = [hit.ordenanza_titulo]
-        cabecera.extend(part for part in (hit.titulo, hit.capitulo, hit.seccion) if part)
-        etiqueta = f"Artículo {hit.articulo}"
-        if hit.epigrafe:
-            etiqueta += f" — {hit.epigrafe}"
-        cabecera.append(etiqueta)
+        if hit.tipo == "tabla":
+            etiqueta = f"{hit.tabla} (Artículo {hit.articulo})"
+            if hit.epigrafe:
+                etiqueta += f" — {hit.epigrafe}"
+            cabecera.append(etiqueta)
+        else:
+            cabecera.extend(
+                part for part in (hit.titulo, hit.capitulo, hit.seccion) if part
+            )
+            etiqueta = f"Artículo {hit.articulo}"
+            if hit.epigrafe:
+                etiqueta += f" — {hit.epigrafe}"
+            cabecera.append(etiqueta)
         return f"[{' · '.join(cabecera)}]\n{hit.texto}"
 
     @staticmethod
@@ -113,7 +121,9 @@ class QAService:
         return Cita(
             ordenanza_id=hit.ordenanza_id,
             ordenanza_titulo=hit.ordenanza_titulo,
+            tipo=hit.tipo,
             articulo=hit.articulo,
+            tabla=hit.tabla,
             epigrafe=hit.epigrafe,
             titulo=hit.titulo,
             capitulo=hit.capitulo,

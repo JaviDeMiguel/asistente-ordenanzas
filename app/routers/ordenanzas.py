@@ -28,6 +28,7 @@ def _to_summary(record: OrdinanceRecord) -> OrdinanceSummary:
         titulo=record.titulo,
         fuente=record.fuente,
         articulo_count=record.articulo_count,
+        tabla_count=record.tabla_count,
         chunk_count=record.chunk_count,
         char_count=record.char_count,
         created_at=record.created_at,
@@ -49,6 +50,7 @@ def create_ordinance(
             titulo=payload.titulo,
             contenido=payload.contenido,
             fuente=payload.fuente,
+            tablas=payload.tablas,
         )
     except EmptyOrdinanceError as exc:
         raise HTTPException(
