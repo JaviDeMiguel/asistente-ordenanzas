@@ -18,6 +18,7 @@ from app.services.table_drafter import (
     TableDraft,
     TableDrafter,
     _diff_specs,
+    _slug,
     draft_tables,
     expand_selection,
     find_table_pages,
@@ -93,18 +94,25 @@ def _draft(*, tabla="Tabla 1", columnas=("Ln",), filas=(("res", ("55",)),), conf
 
 # --- find_table_pages --------------------------------------------------------
 
-def test_find_table_pages_detecta_solo_paginas_con_tabla_numerada():
+def test_find_table_pages_detecta_tablas_cuadros_arabigos_y_romanos():
     textos = [
         "Portada de la ordenanza",
         "Artículo 10. Se aplican los valores de la Tabla 1.",
-        "La tabla siguiente ya no lleva número aquí.",
-        "Artículo 22. Ver TABLA 5 y la tabla nº 6.",
+        # 'tabla de contenidos' NO debe contar (la 'd' de 'de' es romana pero no
+        # queda en frontera de palabra); 'tabla siguiente' tampoco.
+        "La tabla siguiente; véase la tabla de contenidos.",
+        "Artículo 22. Ver TABLA 5, el Cuadro 2 y la Tabla V.",
     ]
     assert find_table_pages(textos) == [1, 3]
 
 
 def test_find_table_pages_sin_tablas_devuelve_lista_vacia():
     assert find_table_pages(["texto sin tablas", "", None]) == []
+
+
+def test_slug_saneado():
+    assert _slug("Tabla 3") == "Tabla-3"
+    assert _slug("  ") == "tabla"
 
 
 # --- looks_like_table / merge_boxes / expand_selection (geometría) -----------
@@ -295,11 +303,34 @@ def test_result_to_document_incluye_tablas_listas_para_publicar():
     assert doc["paginas_analizadas"] == [3]
     assert doc["borradores"][0]["pagina"] == 3
     assert doc["borradores"][0]["confianza"] == "alta"
+    assert "imagen" not in doc["borradores"][0]  # sin imagenes_dir no se añade
     # `tablas` reproduce el esquema del alta (TableSpec), sin metadatos de revisión.
     assert doc["tablas"][0]["tabla"] == "Tabla 1"
     assert set(doc["tablas"][0]) == {
         "tabla", "articulo", "descripcion", "columnas", "unidad", "filas",
     }
+
+
+def test_draft_tables_adjunta_el_recorte_a_cada_borrador():
+    resultado = draft_tables(
+        indices=[2],
+        render_regions=lambda i: [b"PNG-DE-LA-TABLA"],
+        transcribe_page=lambda png, i: {"tablas": [_TABLA_OK]},
+    )
+    assert resultado.borradores[0].imagen == b"PNG-DE-LA-TABLA"
+
+
+def test_crops_y_to_document_referencian_los_recortes():
+    resultado = draft_tables(
+        indices=[2],
+        render_regions=lambda i: [b"PNG"],
+        transcribe_page=lambda png, i: {"tablas": [_TABLA_OK]},
+    )
+    ((nombre, datos),) = resultado.crops()
+    assert datos == b"PNG"
+    assert nombre == "p3_01_Tabla-1.png"
+    doc = resultado.to_document(imagenes_dir="recortes")
+    assert doc["borradores"][0]["imagen"] == "recortes/p3_01_Tabla-1.png"
 
 
 # --- TableDrafter (integración de las piezas, con cliente falso) --------------
@@ -339,6 +370,31 @@ def test_draft_from_pdf_autoselecciona_paginas(monkeypatch):
     resultado = drafter.draft_from_pdf(b"%PDF-fake")
     assert resultado.paginas == [2, 3]  # leyenda (pág.2) + imagen contigua (pág.3)
     assert len(resultado.borradores) == 2
+
+
+def test_draft_from_pdf_fallback_a_imagenes_sin_leyenda(monkeypatch):
+    # Sin leyendas «Tabla N» reconocibles (p. ej. PDF escaneado): se analizan las
+    # páginas con imagen-tabla.
+    monkeypatch.setattr(
+        "app.services.table_drafter._extract_page_texts", lambda pdf: ["sin", "leyendas"]
+    )
+    monkeypatch.setattr("app.services.table_drafter._image_table_pages", lambda pdf: [0, 1])
+    drafter = TableDrafter(
+        _settings(), client=_FakeClient({"tablas": []}), render_regions=lambda pdf, i: [b"PNG"]
+    )
+    resultado = drafter.draft_from_pdf(b"%PDF")
+    assert resultado.paginas == [1, 2]
+
+
+def test_draft_from_pdf_sin_tablas_ni_imagenes_vacio(monkeypatch):
+    monkeypatch.setattr("app.services.table_drafter._extract_page_texts", lambda pdf: ["texto"])
+    monkeypatch.setattr("app.services.table_drafter._image_table_pages", lambda pdf: [])
+    drafter = TableDrafter(
+        _settings(), client=_FakeClient({"tablas": []}), render_regions=lambda pdf, i: [b"PNG"]
+    )
+    resultado = drafter.draft_from_pdf(b"%PDF")
+    assert resultado.paginas == []
+    assert resultado.borradores == []
 
 
 def test_draft_from_pdf_paginas_forzadas_usa_render_por_defecto(monkeypatch):

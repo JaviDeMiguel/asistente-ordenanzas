@@ -68,14 +68,22 @@ La transcripción estructurada de las tablas de la ordenanza acústica está en
 valores contra el original antes de producción).
 
 Transcribirlas a mano es tedioso, así que hay un **drafter asistido por visión**
-([`scripts/draft_tables.py`](scripts/draft_tables.py)): selecciona las páginas con
-tabla (por la leyenda «Tabla N» y por las imágenes contiguas a ellas), **recorta
-cada tabla** de la página con `pypdfium2` (una imagen por tabla, lo que además
-deshace las maquetas a dos columnas) y se la pasa a **Claude (visión)** para que
-la transcriba a un **borrador** `TableSpec` en JSON. La salida no se indexa: es un
-borrador para que un humano **verifique los valores** antes de publicarlos (para un
-umbral legal, un número mal leído es peor que no responder; por eso el modelo marca
-la `confianza` y se avisa de las celdas dudosas o desalineadas).
+([`scripts/draft_tables.py`](scripts/draft_tables.py)):
+
+1. **Selecciona** las páginas con tabla: por la leyenda («Tabla N», «Cuadro N»,
+   con número arábigo o romano) más las páginas-imagen contiguas a ellas. Si el PDF
+   no tiene leyendas reconocibles (escaneado u otra maqueta), recurre a las páginas
+   con imagen de tamaño de tabla; y siempre puedes acotar con `--paginas`.
+2. **Recorta cada tabla** de la página con `pypdfium2` (una imagen por tabla, lo que
+   además deshace las maquetas a dos columnas).
+3. La transcribe con **Claude (visión)** a un **borrador** `TableSpec` en JSON.
+
+La salida no se indexa: es un borrador para que un humano **verifique los valores**
+antes de publicarlos (para un umbral legal, un número mal leído es peor que no
+responder; por eso el modelo marca la `confianza` y se avisa de las celdas dudosas
+o desalineadas). Junto al JSON se guarda un `<pdf>.tablas_recortes/` con la **imagen
+recortada de cada tabla**, referenciada en el borrador, para cotejar transcripción
+e imagen de un vistazo.
 
 Con `--verificar` cada tabla se transcribe **dos veces** y se reconcilian las
 lecturas: cualquier celda en la que las dos pasadas discrepen baja a confianza
@@ -85,7 +93,8 @@ lo que hay que revisar).
 ```bash
 pip install -r requirements-drafter.txt   # pypdfium2 + Pillow (solo para el drafter)
 python scripts/draft_tables.py Ordenanza-Acustica.pdf --verificar   # requiere ANTHROPIC_API_KEY
-# → Ordenanza-Acustica.tablas.json  (revisa `tablas` y publícalas con el alta)
+# → Ordenanza-Acustica.tablas.json  +  Ordenanza-Acustica.tablas_recortes/*.png
+#   (revisa `tablas` contra los recortes y publícalas con el alta)
 ```
 
 ## Características
@@ -214,12 +223,13 @@ y la base vectorial se fuerzan a memoria.
 ## Limitaciones y hoja de ruta
 
 - **Tablas: extracción automática (visión).** Como van incrustadas como imágenes,
-  hay un drafter que **recorta cada tabla** de la página y la transcribe con
-  **Claude (visión)** a un borrador `TableSpec` para revisión humana, con una
-  **verificación cruzada** opcional (`--verificar`) que marca las celdas en las que
-  dos lecturas discrepan ([`scripts/draft_tables.py`](scripts/draft_tables.py)).
-  Pendiente: afinar la selección de páginas para PDFs con maquetas muy distintas y
-  una salida con la imagen recortada junto al borrador para revisar de un vistazo.
+  hay un drafter que **selecciona y recorta cada tabla** de la página, la transcribe
+  con **Claude (visión)** a un borrador `TableSpec` y guarda el recorte junto al
+  borrador para revisión humana, con **verificación cruzada** opcional (`--verificar`)
+  que marca las celdas en las que dos lecturas discrepan
+  ([`scripts/draft_tables.py`](scripts/draft_tables.py)). Pendiente: probarlo contra
+  la API real y una vía para tablas **vectoriales** sin leyenda ni imagen (raras en
+  el BOP, pero posibles en otras maquetas).
 - **Parser heurístico.** El troceado está afinado para el formato del BOP de
   Toledo (numeración secuencial de artículos). Ante un articulado sin estructura
   reconocible, el sistema recurre a un troceado por palabras (degradación

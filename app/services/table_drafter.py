@@ -39,8 +39,13 @@ from app.services.llm_service import LLMConfigurationError
 # Marca las celdas sin dato; coincide con `_SIN_DATO` de `table_service`.
 _SIN_DATO = "s/d"
 
-# Detecta el encabezado de una tabla numerada ("Tabla 1", "TABLA 5", "tabla nº 6").
-_CAPTION_RE = re.compile(r"tabla\s+n?[.ºo\s]*\d+", re.IGNORECASE)
+# Detecta el encabezado de una tabla o cuadro numerado, con número arábigo o
+# romano: "Tabla 1", "TABLA 5", "tabla nº 6", "Cuadro 2", "Tabla V", "Cuadro II".
+# El `\b` final evita falsos positivos como "Tabla de contenidos" (la 'd' de "de"
+# es número romano, pero no queda en frontera de palabra).
+_CAPTION_RE = re.compile(
+    r"(?:tabla|cuadro)\s+(?:n[.ºo°\s]*)?(?:\d+|[ivxlcdm]+)\b", re.IGNORECASE
+)
 
 # Umbrales para tratar una imagen incrustada como tabla (y no como logo/firma):
 # ancho mínimo relativo al de la página y alto mínimo en puntos PDF.
@@ -129,14 +134,22 @@ _DRAFT_SCHEMA = {
 }
 
 
+def _slug(texto: str) -> str:
+    """Convierte una etiqueta en un nombre de archivo seguro ('Tabla 3' -> 'Tabla-3')."""
+    limpio = re.sub(r"[^\w.-]+", "-", texto.strip()).strip("-")
+    return limpio or "tabla"
+
+
 @dataclass
 class TableDraft:
-    """Un borrador de tabla: la `TableSpec` más metadatos para la revisión."""
+    """Un borrador de tabla: la `TableSpec`, metadatos y su recorte-imagen."""
 
     spec: TableSpec
     pagina: int
     confianza: str = "media"
     nota: str = ""
+    # PNG del recorte que produjo el borrador (para revisarlo junto al JSON).
+    imagen: bytes | None = None
 
 
 @dataclass
@@ -147,26 +160,44 @@ class TableDraftResult:
     avisos: list[str] = field(default_factory=list)
     paginas: list[int] = field(default_factory=list)
 
-    def to_document(self) -> dict:
+    def _named_crops(self) -> list[tuple[TableDraft, str]]:
+        """Empareja cada borrador con un nombre de archivo de recorte único."""
+        contador: dict[int, int] = {}
+        named: list[tuple[TableDraft, str]] = []
+        for d in self.borradores:
+            contador[d.pagina] = contador.get(d.pagina, 0) + 1
+            nombre = f"p{d.pagina}_{contador[d.pagina]:02d}_{_slug(d.spec.tabla)}.png"
+            named.append((d, nombre))
+        return named
+
+    def crops(self) -> list[tuple[str, bytes]]:
+        """Pares `(nombre_archivo, PNG)` de los recortes de cada tabla."""
+        return [(n, d.imagen) for d, n in self._named_crops() if d.imagen is not None]
+
+    def to_document(self, *, imagenes_dir: str = "") -> dict:
         """Serializa a un documento de revisión (JSON listo para editar y publicar).
 
         El campo `tablas` reproduce el esquema del alta de una ordenanza (campo
         `tablas`), listo para publicar una vez revisado. `borradores` añade la
-        página, la confianza y la nota de cada tabla para facilitar el repaso.
+        página, la confianza, la nota y —si `imagenes_dir` se indica— la ruta al
+        recorte de cada tabla, para revisar transcripción e imagen de un vistazo.
         """
+        borradores = []
+        for d, nombre in self._named_crops():
+            entrada = {
+                "pagina": d.pagina,
+                "confianza": d.confianza,
+                "nota": d.nota,
+                "tabla": d.spec.model_dump(),
+            }
+            if imagenes_dir and d.imagen is not None:
+                entrada["imagen"] = f"{imagenes_dir}/{nombre}"
+            borradores.append(entrada)
         return {
             "revisar_antes_de_indexar": True,
             "paginas_analizadas": self.paginas,
             "avisos": self.avisos,
-            "borradores": [
-                {
-                    "pagina": d.pagina,
-                    "confianza": d.confianza,
-                    "nota": d.nota,
-                    "tabla": d.spec.model_dump(),
-                }
-                for d in self.borradores
-            ],
+            "borradores": borradores,
             "tablas": [d.spec.model_dump() for d in self.borradores],
         }
 
@@ -411,17 +442,16 @@ def draft_tables(
                 for _ in range(passes)
             ]
             if passes > 1:
-                borradores_base, avisos_base = resultados[0]
-                reconciliados, avisos_verif = reconcile_drafts(
+                region_borradores, region_avisos = reconcile_drafts(
                     [r[0] for r in resultados], pagina=idx + 1
                 )
-                borradores.extend(reconciliados)
-                avisos.extend(avisos_base)
-                avisos.extend(avisos_verif)
+                region_avisos = resultados[0][1] + region_avisos
             else:
                 region_borradores, region_avisos = resultados[0]
-                borradores.extend(region_borradores)
-                avisos.extend(region_avisos)
+            for d in region_borradores:
+                d.imagen = region_png  # el recorte que produjo el borrador
+            borradores.extend(region_borradores)
+            avisos.extend(region_avisos)
     return TableDraftResult(
         borradores=borradores,
         avisos=avisos,
@@ -627,9 +657,16 @@ class TableDrafter:
         if paginas is not None:
             indices = sorted({p - 1 for p in paginas if 1 <= p <= len(page_texts)})
         else:
-            indices = expand_selection(
-                find_table_pages(page_texts), _image_table_pages(pdf_bytes)
-            )
+            caption_pages = find_table_pages(page_texts)
+            image_pages = _image_table_pages(pdf_bytes)
+            if caption_pages:
+                indices = expand_selection(
+                    caption_pages, image_pages, radius=self._settings.drafter_page_radius
+                )
+            else:
+                # Sin leyendas «Tabla N» reconocibles (p. ej. PDF escaneado o con
+                # otra maqueta): analiza las páginas con imagen-tabla, si las hay.
+                indices = image_pages
         return draft_tables(
             indices=indices,
             render_regions=lambda i: self._regions(pdf_bytes, i),

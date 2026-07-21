@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     drafter_render_scale: float = 2.2
     drafter_crop_margin_pt: float = 14.0
     drafter_crop_margin_top_pt: float = 46.0
+    # Distancia (en páginas) a la que una página-imagen se asocia a una página con
+    # leyenda «Tabla N». Súbela si en tu PDF la leyenda y la tabla-imagen quedan
+    # más separadas.
+    drafter_page_radius: int = 1
 
     # --- Base de datos (metadatos de las ordenanzas) ---
     db_path: str = "data/app.db"

@@ -76,10 +76,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    documento = resultado.to_document()
+    # Escribe un recorte-imagen por tabla en <salida>_recortes/ y lo referencia
+    # en el JSON, para revisar transcripción e imagen de un vistazo.
+    recortes = resultado.crops()
+    recortes_dir = salida.parent / f"{salida.stem}_recortes"
+    if recortes:
+        recortes_dir.mkdir(exist_ok=True)
+        for nombre, datos in recortes:
+            (recortes_dir / nombre).write_bytes(datos)
+
+    documento = resultado.to_document(imagenes_dir=recortes_dir.name if recortes else "")
     salida.write_text(json.dumps(documento, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"Páginas analizadas: {resultado.paginas or '(ninguna con tabla)'}")
+    print(f"Páginas analizadas: {resultado.paginas or '(ninguna)'}")
     print(f"Tablas en borrador: {len(resultado.borradores)}")
     for d in resultado.borradores:
         print(f"  - {d.spec.tabla} (Art. {d.spec.articulo}, pág. {d.pagina}) "
@@ -88,7 +97,13 @@ def main(argv: list[str] | None = None) -> int:
         print("\nAvisos (revisar):")
         for aviso in resultado.avisos:
             print(f"  ! {aviso}")
-    print(f"\n⚠️  BORRADOR sin verificar. Revisa los valores en {salida} antes de indexar.")
+    if not resultado.paginas:
+        print("\nNo se detectaron tablas automáticamente. Indica las páginas con "
+              "--paginas N,N (1-based) si sabes dónde están.")
+        return 0
+    if recortes:
+        print(f"\nRecortes de cada tabla en: {recortes_dir}")
+    print(f"⚠️  BORRADOR sin verificar. Revisa los valores en {salida} antes de indexar.")
     return 0
 
 
