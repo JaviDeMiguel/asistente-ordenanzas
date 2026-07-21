@@ -86,9 +86,11 @@ recortada de cada tabla**, referenciada en el borrador, para cotejar transcripci
 e imagen de un vistazo.
 
 Con `--verificar` cada tabla se transcribe **dos veces** y se reconcilian las
-lecturas: cualquier celda en la que las dos pasadas discrepen baja a confianza
-«baja» y se lista en los avisos (dos lecturas distintas del mismo número son justo
-lo que hay que revisar).
+lecturas **por posición**: si el mismo valor difiere entre las dos pasadas, la
+tabla baja a confianza «baja» y el aviso señala la celda exacta (p. ej. «fila 3,
+col 2: 63 vs 68»), que es lo que importa para un umbral legal. Las diferencias de
+formato o estructura (nombres de columna, nº de filas) se anotan aparte como aviso
+menor, sin dudar de los números que sí coinciden.
 
 ```bash
 pip install -r requirements-drafter.txt   # pypdfium2 + Pillow (solo para el drafter)
@@ -227,9 +229,10 @@ y la base vectorial se fuerzan a memoria.
   con **Claude (visión)** a un borrador `TableSpec` y guarda el recorte junto al
   borrador para revisión humana, con **verificación cruzada** opcional (`--verificar`)
   que marca las celdas en las que dos lecturas discrepan
-  ([`scripts/draft_tables.py`](scripts/draft_tables.py)). Pendiente: probarlo contra
-  la API real y una vía para tablas **vectoriales** sin leyenda ni imagen (raras en
-  el BOP, pero posibles en otras maquetas).
+  ([`scripts/draft_tables.py`](scripts/draft_tables.py)). Validado contra la API
+  real (Opus 4.8) sobre las ordenanzas de Talavera. Pendiente: una vía para tablas
+  **vectoriales** sin leyenda ni imagen (raras en el BOP, pero posibles en otras
+  maquetas).
 - **Parser heurístico.** El troceado está afinado para el formato del BOP de
   Toledo (numeración secuencial de artículos). Ante un articulado sin estructura
   reconocible, el sistema recurre a un troceado por palabras (degradación

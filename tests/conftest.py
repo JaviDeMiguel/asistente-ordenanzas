@@ -14,10 +14,13 @@ import os
 os.environ["DB_PATH"] = ":memory:"
 os.environ["CHROMA_PATH"] = ":memory:"
 os.environ["EMBEDDING_PROVIDER"] = "local"
-# Nos aseguramos de que los tests no dependan de claves del entorno del
-# desarrollador (el camino 503 espera que NO haya clave de Anthropic).
-os.environ.pop("ANTHROPIC_API_KEY", None)
-os.environ.pop("VOYAGE_API_KEY", None)
+# Los tests corren SIN claves (el camino 503 espera que NO haya clave de
+# Anthropic). No basta con quitarlas del entorno: la configuración también lee un
+# `.env` si existe. Las fijamos a cadena vacía porque las variables de entorno
+# tienen prioridad sobre el `.env`, así el suite es hermético aunque haya un
+# `.env` con claves reales en local.
+os.environ["ANTHROPIC_API_KEY"] = ""
+os.environ["VOYAGE_API_KEY"] = ""
 
 import pytest
 from fastapi.testclient import TestClient

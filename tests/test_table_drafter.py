@@ -17,7 +17,7 @@ from app.services.llm_service import LLMConfigurationError
 from app.services.table_drafter import (
     TableDraft,
     TableDrafter,
-    _diff_specs,
+    _compare_specs,
     _slug,
     draft_tables,
     expand_selection,
@@ -210,35 +210,54 @@ def test_reconcile_drafts_discrepancia_de_valor_baja_confianza():
     d2 = _draft(filas=(("res", ("56",)),))  # una lectura distinta del mismo número
     reconciliados, avisos = reconcile_drafts([[d1], [d2]], pagina=3)
     assert reconciliados[0].confianza == "baja"
-    assert "discrepancia entre pasadas de visión" in reconciliados[0].nota
-    assert any("['55'] vs ['56']" in a for a in avisos)
+    assert "discrepancia de valores entre pasadas" in reconciliados[0].nota
+    assert any("'55' vs '56'" in a for a in avisos)
 
 
-def test_reconcile_drafts_tabla_ausente_en_una_pasada():
+def test_reconcile_drafts_ignora_diferencias_de_nombre():
+    # Mismos valores; solo cambian el nombre de columna (Ld vs L_d) y la etiqueta
+    # de fila ('a - res' vs 'a res'). No debe bajar la confianza ni avisar.
+    d1 = _draft(tabla="Tabla 1", columnas=("Ld",), filas=(("a - res", ("55",)),))
+    d2 = _draft(tabla="Tabla 1", columnas=("L_d",), filas=(("a res", ("55",)),))
+    reconciliados, avisos = reconcile_drafts([[d1], [d2]], pagina=3)
+    assert reconciliados[0].confianza == "alta"
+    assert avisos == []
+
+
+def test_reconcile_drafts_estructura_difiere_sin_conflicto_de_valor():
+    # Una pasada trae una fila menos; los valores comparables coinciden -> nota de
+    # estructura, sin bajar la confianza.
+    d1 = _draft(columnas=("Ld",), filas=(("r1", ("55",)), ("r2", ("60",))))
+    d2 = _draft(columnas=("Ld",), filas=(("r1", ("55",)),))
+    reconciliados, avisos = reconcile_drafts([[d1], [d2]], pagina=3)
+    assert reconciliados[0].confianza == "alta"
+    assert any("estructura difiere" in a and "filas 2 vs 1" in a for a in avisos)
+
+
+def test_reconcile_drafts_numero_de_tablas_difiere():
     d1 = _draft(tabla="Tabla 1")
     reconciliados, avisos = reconcile_drafts([[d1], []], pagina=3)
-    assert reconciliados[0].confianza == "baja"
-    assert any("no la detectó" in a for a in avisos)
-
-
-def test_reconcile_drafts_tabla_solo_en_otra_pasada():
-    d1 = _draft(tabla="Tabla 1")
-    d2 = _draft(tabla="Tabla 2")
-    _, avisos = reconcile_drafts([[d1], [d1, d2]], pagina=3)
-    assert any("Tabla 2" in a and "solo la detectó" in a for a in avisos)
+    assert reconciliados[0].confianza == "alta"  # la pasada 1 la leyó bien
+    assert any("nº de tablas" in a for a in avisos)
 
 
 def test_reconcile_drafts_sin_pasadas():
     assert reconcile_drafts([], pagina=1) == ([], [])
 
 
-def test_diff_specs_reporta_columnas_y_filas_dispares():
-    a = _draft(columnas=("Ln",), filas=(("solo_a", ("1",)),)).spec
-    b = _draft(columnas=("Ld",), filas=(("solo_b", ("2",)),)).spec
-    difs = _diff_specs(a, b)
-    assert any("columnas" in d for d in difs)
-    assert any("solo_a" in d and "ausente" in d for d in difs)
-    assert any("solo_b" in d and "solo en otra" in d for d in difs)
+def test_compare_specs_separa_valores_de_estructura():
+    a = _draft(columnas=("Ld", "Le"), filas=(("r1", ("55", "65")),)).spec
+    b = _draft(columnas=("Ld",), filas=(("r1", ("56",)),)).spec
+    conflictos, notas = _compare_specs(a, b)
+    assert any("'55' vs '56'" in c for c in conflictos)  # conflicto de valor
+    assert any("columnas" in n for n in notas)           # nota de estructura
+
+
+def test_compare_specs_normaliza_espacios_y_mayusculas():
+    a = _draft(filas=(("r", ("S/D",)),)).spec
+    b = _draft(filas=(("r", (" s/d ",)),)).spec
+    conflictos, _ = _compare_specs(a, b)
+    assert conflictos == []
 
 
 # --- draft_tables (orquestación) ---------------------------------------------

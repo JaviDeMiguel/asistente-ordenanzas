@@ -62,11 +62,19 @@ _SYSTEM_PROMPT = (
     "como apoyo, el texto de esa página. Transcribe EXACTAMENTE los valores tal "
     "como aparecen en la imagen: no redondees, no interpretes, no completes ni "
     "corrijas. Copia cada número tal cual. Si una celda está vacía o es "
-    f"ilegible, usa '{_SIN_DATO}'. Alinea cada valor con su columna. No inventes "
-    "filas ni columnas ni tablas que no estén en la imagen. Marca "
-    "`confianza: 'baja'` cuando la imagen sea de baja calidad o dudes de algún "
-    "valor, y explica en `nota` qué hay que revisar. Devuelve únicamente las "
-    "tablas realmente presentes en la imagen."
+    f"ilegible, usa '{_SIN_DATO}'. No inventes filas ni columnas ni tablas que no "
+    "estén en la imagen. "
+    # Reglas de estructura (para que la transcripción sea reproducible):
+    "La etiqueta de cada fila (la primera columna, la que nombra la fila) va "
+    "SIEMPRE en `clave`, NUNCA en `valores`. `columnas` contiene solo las "
+    "columnas de datos (no incluyas la columna de etiquetas de fila). `valores` "
+    "contiene solo las celdas de datos, una por cada columna de `columnas` y en "
+    "su mismo orden. Escribe los nombres de columna tal cual, sin añadir "
+    "subíndices ni prefijos (por ejemplo 'Ld', no 'L_d'). Da las filas en el "
+    "orden en que aparecen en la imagen. "
+    "Marca `confianza: 'baja'` cuando la imagen sea de baja calidad o dudes de "
+    "algún valor, y explica en `nota` qué hay que revisar. Devuelve únicamente "
+    "las tablas realmente presentes en la imagen."
 )
 
 _USER_INSTRUCTION = (
@@ -351,23 +359,41 @@ def parse_table_drafts(raw: object, *, pagina: int) -> tuple[list[TableDraft], l
     return borradores, avisos
 
 
-def _diff_specs(a: TableSpec, b: TableSpec) -> list[str]:
-    """Diferencias legibles entre dos transcripciones de la misma tabla."""
-    difs: list[str] = []
-    if a.columnas != b.columnas:
-        difs.append(f"columnas {a.columnas} vs {b.columnas}")
-    amap = {f.clave: f.valores for f in a.filas}
-    bmap = {f.clave: f.valores for f in b.filas}
-    for clave, va in amap.items():
-        vb = bmap.get(clave)
-        if vb is None:
-            difs.append(f"fila «{clave}» ausente en otra pasada")
-        elif va != vb:
-            difs.append(f"fila «{clave}»: {va} vs {vb}")
-    for clave in bmap:
-        if clave not in amap:
-            difs.append(f"fila «{clave}» solo en otra pasada")
-    return difs
+def _norm_val(valor: str) -> str:
+    """Normaliza una celda para comparar valores (ignora espacios y mayúsculas)."""
+    return re.sub(r"\s+", "", valor).lower()
+
+
+def _compare_specs(a: TableSpec, b: TableSpec) -> tuple[list[str], list[str]]:
+    """Compara dos transcripciones de la misma tabla, fila a fila por posición.
+
+    Separa lo que importa de lo que no:
+      - `conflictos_valor`: celdas de datos que no coinciden en la misma posición
+        (p. ej. «fila 3 col 2: '63' vs '68'»). Para un umbral legal, esto es lo
+        que hay que revisar.
+      - `notas_forma`: diferencias de forma (nº de columnas o de filas, longitud
+        de una fila). Son de maquetado, no de contenido, y no bastan para dudar
+        de los números comparables.
+    Las diferencias de *nombre* de columna o de etiqueta de fila se ignoran (no
+    cambian los valores).
+    """
+    conflictos_valor: list[str] = []
+    notas_forma: list[str] = []
+    if len(a.columnas) != len(b.columnas):
+        notas_forma.append(f"columnas {len(a.columnas)} vs {len(b.columnas)}")
+    if len(a.filas) != len(b.filas):
+        notas_forma.append(f"filas {len(a.filas)} vs {len(b.filas)}")
+    for i in range(min(len(a.filas), len(b.filas))):
+        fa, fb = a.filas[i], b.filas[i]
+        if len(fa.valores) != len(fb.valores):
+            notas_forma.append(f"fila {i + 1}: {len(fa.valores)} vs {len(fb.valores)} valores")
+        for j in range(min(len(fa.valores), len(fb.valores))):
+            if _norm_val(fa.valores[j]) != _norm_val(fb.valores[j]):
+                conflictos_valor.append(
+                    f"fila {i + 1} («{fa.clave[:24]}») col {j + 1}: "
+                    f"'{fa.valores[j]}' vs '{fb.valores[j]}'"
+                )
+    return conflictos_valor, notas_forma
 
 
 def reconcile_drafts(
@@ -376,44 +402,48 @@ def reconcile_drafts(
     """Cruza varias transcripciones de la misma región y marca discrepancias.
 
     Toma los borradores de cada pasada de visión (misma imagen, transcrita N
-    veces), los empareja por etiqueta de tabla y compara celda a celda. Cualquier
-    desacuerdo baja la confianza a «baja» y genera un aviso con el detalle: para
-    un umbral legal, dos lecturas distintas del mismo número son justo lo que hay
-    que revisar antes de publicar.
+    veces) y los empareja **por posición** (cada región suele tener una tabla).
+    Solo un desacuerdo de **valor** baja la confianza a «baja»; las diferencias de
+    estructura o de nombres se anotan como aviso menor sin dudar de los números.
     """
     if not pasadas:
         return [], []
-    por_etiqueta = [{d.spec.tabla: d for d in pasada} for pasada in pasadas]
+    base = pasadas[0]
     reconciliados: list[TableDraft] = []
     avisos: list[str] = []
 
-    for etiqueta, base in por_etiqueta[0].items():
-        conflictos: list[str] = []
-        for j in range(1, len(pasadas)):
-            otra = por_etiqueta[j].get(etiqueta)
-            if otra is None:
-                conflictos.append(f"la pasada {j + 1} no la detectó")
-                continue
-            conflictos.extend(_diff_specs(base.spec, otra.spec))
-        if conflictos:
-            nota = f"{base.nota} [discrepancia entre pasadas de visión]".strip()
+    if any(len(p) != len(base) for p in pasadas[1:]):
+        avisos.append(
+            f"Página {pagina}: el nº de tablas detectadas difiere entre pasadas "
+            f"{[len(p) for p in pasadas]}; revisar."
+        )
+
+    for i, d in enumerate(base):
+        conflictos_valor: list[str] = []
+        notas_forma: list[str] = []
+        for otra in pasadas[1:]:
+            if i < len(otra):
+                cv, nf = _compare_specs(d.spec, otra[i].spec)
+                conflictos_valor.extend(cv)
+                notas_forma.extend(nf)
+        etiqueta = d.spec.tabla
+        if conflictos_valor:
+            nota = f"{d.nota} [discrepancia de valores entre pasadas]".strip()
             reconciliados.append(
-                TableDraft(spec=base.spec, pagina=base.pagina, confianza="baja", nota=nota)
+                TableDraft(spec=d.spec, pagina=d.pagina, confianza="baja", nota=nota)
             )
             avisos.append(
-                f"Página {pagina}, {etiqueta}: discrepancia entre pasadas — "
-                + "; ".join(conflictos[:6])
-                + " — verificar."
+                f"Página {pagina}, {etiqueta}: discrepancia de valores entre "
+                "pasadas — " + "; ".join(conflictos_valor[:6]) + " — verificar."
             )
         else:
-            reconciliados.append(base)
-
-    for j in range(1, len(pasadas)):
-        for etiqueta in por_etiqueta[j]:
-            if etiqueta not in por_etiqueta[0]:
+            reconciliados.append(d)
+            if notas_forma:
+                unicas = list(dict.fromkeys(notas_forma))[:4]
                 avisos.append(
-                    f"Página {pagina}, {etiqueta}: solo la detectó la pasada "
-                    f"{j + 1}; revisar."
+                    f"Página {pagina}, {etiqueta}: la estructura difiere entre "
+                    f"pasadas ({'; '.join(unicas)}), pero los valores comparables "
+                    "coinciden."
                 )
     return reconciliados, avisos
 
