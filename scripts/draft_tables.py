@@ -37,6 +37,14 @@ def _parse_paginas(valor: str | None) -> list[int] | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # En Windows la consola/redirección usa cp1252 y no puede codificar algunos
+    # caracteres (p. ej. emojis); forzamos UTF-8 para no romper al imprimir.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pdf", type=Path, help="Ruta al PDF de la ordenanza.")
     parser.add_argument(
