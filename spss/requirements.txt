@@ -1,0 +1,4 @@
+# Dependencias de savtools.py (la vía sin SPSS instalado).
+pyreadstat>=1.2
+pandas>=2.0
+openpyxl>=3.1
