@@ -64,6 +64,44 @@ Todos los subcomandos aceptan **varios archivos** a la vez (p. ej.
 `python savtools.py informe datos/*.sav`), así que sirven para lotes sin
 escribir nada más.
 
+## De la imagen de un cuestionario a la matriz de datos
+
+[`cuestionario_a_matriz.py`](cuestionario_a_matriz.py) automatiza la **grabación
+de datos**: recibe fotos o escaneos de cuestionarios y genera la matriz lista
+para SPSS. Funciona en dos pasos, con revisión humana entre ambos (la visión
+propone, el humano verifica — el mismo enfoque que el drafter de tablas del
+repositorio):
+
+```bash
+export ANTHROPIC_API_KEY=...        # en Windows: set ANTHROPIC_API_KEY=...
+
+# 1. Libro de códigos desde la imagen del cuestionario (en blanco o cumplimentado):
+#    variables, tipos (única/múltiple/numérica/abierta) y opciones codificadas.
+python cuestionario_a_matriz.py codebook cuestionario.png
+#    → codebook.json  (REVÍSALO: nombres, códigos, opciones)
+
+# 2. Extraer las respuestas de los cuestionarios cumplimentados y montar la matriz:
+python cuestionario_a_matriz.py extraer codebook.json fotos/*.jpg --salida datos
+#    → datos.sav              matriz con etiquetas de variable y de valor
+#    → datos.csv              la misma matriz en texto plano
+#    → datos.incidencias.txt  qué revisar a mano
+```
+
+Detalles que importan para que la matriz sea fiable:
+
+- **Una fila por cuestionario, una columna por variable**; las preguntas de
+  respuesta múltiple se expanden a una columna 0/1 por opción (`p5_1`, `p5_2`…).
+- **Nada se corrige en silencio.** Dos marcas en una pregunta de respuesta
+  única, un «treinta» donde va un número o un código fuera del codebook quedan
+  como **valor perdido** y anotados en `incidencias.txt` con el caso y la
+  variable, para cotejarlos contra la imagen.
+- **Cuestionarios de varias páginas**: `--paginas-por-caso N` agrupa cada N
+  imágenes consecutivas como un mismo cuestionario.
+- **`--verificar`** lee cada cuestionario dos veces y señala en incidencias las
+  celdas en las que las dos lecturas discrepan (dobla el coste en llamadas).
+- Las imágenes se envían a la API de Anthropic; tenlo en cuenta si los
+  cuestionarios contienen datos personales.
+
 ## ¿Qué vía elegir?
 
 | Tarea | Vía |
