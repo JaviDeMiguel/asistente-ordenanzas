@@ -60,13 +60,16 @@ def load_csv(path: str, timezone: str = "America/New_York") -> pd.DataFrame:
     if time_col is None:
         time_col = raw.columns[0]
 
-    index = pd.to_datetime(raw[time_col], utc=False, format="mixed")
+    # Un CSV largo puede mezclar offsets (-04:00/-05:00) por el horario de
+    # verano; en ese caso hay que parsear en UTC y convertir después.
+    sample = pd.Timestamp(str(raw[time_col].dropna().iloc[0]))
     df = raw.drop(columns=[time_col])
-    df.index = pd.DatetimeIndex(index)
-    if df.index.tz is None:
-        df.index = df.index.tz_localize(timezone)
+    if sample.tz is None:
+        index = pd.to_datetime(raw[time_col], format="mixed")
+        df.index = pd.DatetimeIndex(index).tz_localize(timezone)
     else:
-        df.index = df.index.tz_convert(timezone)
+        index = pd.to_datetime(raw[time_col], utc=True, format="mixed")
+        df.index = pd.DatetimeIndex(index).tz_convert(timezone)
     df = _normalize_columns(df)
     df = df.sort_index()
     df = df[~df.index.duplicated(keep="first")]
