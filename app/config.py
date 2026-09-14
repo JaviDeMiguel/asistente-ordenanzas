@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-opus-4-8"
     max_answer_tokens: int = 2048
+    # Tiempo máximo por intento y reintentos automáticos del SDK (429, 5xx y
+    # errores de red) al responder consultas. Sin un límite propio, el SDK espera
+    # hasta 10 min por intento: si el proveedor se cuelga, la petición quedaría
+    # bloqueada. El drafter de tablas (offline) no los usa.
+    anthropic_timeout_seconds: float = 60.0
+    anthropic_max_retries: int = 2
 
     # --- Drafter de tablas por visión (herramienta offline) ---
     # Presupuesto de tokens y escala de render (≈ resolución) al transcribir una

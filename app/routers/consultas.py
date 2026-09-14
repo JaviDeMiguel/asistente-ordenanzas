@@ -8,7 +8,7 @@ from app.models.schemas import (
     QuestionRequest,
     SearchResponse,
 )
-from app.services.llm_service import LLMConfigurationError
+from app.services.llm_service import LLMConfigurationError, LLMProviderError
 from app.services.qa_service import (
     OrdinanceNotFoundError,
     QAService,
@@ -23,6 +23,7 @@ router = APIRouter(prefix="/consultas", tags=["consultas"])
     response_model=AnswerResponse,
     responses={
         status.HTTP_404_NOT_FOUND: {"model": ErrorResponse},
+        status.HTTP_502_BAD_GATEWAY: {"model": ErrorResponse},
         status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ErrorResponse},
     },
     summary="Preguntar en lenguaje natural sobre las ordenanzas (RAG con citas)",
@@ -45,6 +46,11 @@ def preguntar(
     except LLMConfigurationError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except LLMProviderError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
 

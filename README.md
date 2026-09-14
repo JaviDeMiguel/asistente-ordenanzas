@@ -206,6 +206,10 @@ Todas las opciones se leen de variables de entorno o de `.env` (ver
 
 - `ANTHROPIC_API_KEY` — necesaria para generar respuestas (no para ingesta ni
   búsqueda).
+- `ANTHROPIC_TIMEOUT_SECONDS` / `ANTHROPIC_MAX_RETRIES` — límite por intento y
+  reintentos del SDK. Si el proveedor del LLM cae (timeout, error de red,
+  5xx/529, respuesta vacía), `/consultas` responde **502** con un JSON
+  `{"detail": "..."}` legible, sin trazas ni detalles internos del SDK.
 - `EMBEDDING_PROVIDER` — `local` (por defecto) o `voyage` (semántico; requiere
   `VOYAGE_API_KEY` y el paquete `voyageai`).
 - `ARTICLE_MAX_WORDS` / `ARTICLE_OVERLAP` — umbral para partir artículos largos.
@@ -220,7 +224,9 @@ pytest            # cobertura mínima exigida: 85 %
 
 Los tests corren **offline y sin claves**: el LLM se sustituye por un doble que
 registra las llamadas y los embeddings usan el proveedor local. La base de datos
-y la base vectorial se fuerzan a memoria.
+y la base vectorial se fuerzan a memoria. Los fallos del proveedor del LLM
+(timeout, sin conexión, 429/500/529 y respuesta vacía → 502) se prueban en
+`tests/test_llm_failures.py`.
 
 ## Limitaciones y hoja de ruta
 

@@ -7,11 +7,20 @@ aplicación no dependa directamente del SDK. Usamos pensamiento adaptativo
 El prompt de sistema fija el comportamiento del asistente jurídico: responder
 solo con los artículos recuperados y **citar siempre el número de artículo y la
 ordenanza**, para que la respuesta sea verificable.
+
+Los fallos del proveedor (caído, timeout, error HTTP, respuesta vacía) se
+traducen a `LLMProviderError`, que el router convierte en un 502.
 """
+
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import anthropic
 
 from app.config import Settings
+
+logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = (
     "Eres un asistente que responde preguntas sobre ordenanzas municipales. "
@@ -27,6 +36,34 @@ _SYSTEM_PROMPT = (
 
 class LLMConfigurationError(RuntimeError):
     """Se lanza cuando falta la configuración necesaria para llamar al LLM."""
+
+
+class LLMProviderError(RuntimeError):
+    """Se lanza cuando el proveedor del LLM falla o no devuelve una respuesta útil.
+
+    El mensaje es apto para mostrarlo al cliente: no incluye detalles internos
+    del SDK (esos se registran en el log).
+    """
+
+
+@contextmanager
+def _provider_errors() -> Iterator[None]:
+    """Traduce las excepciones del SDK de Anthropic a `LLMProviderError`.
+
+    Cuando llegan aquí, el SDK ya ha agotado sus reintentos automáticos
+    (429, 5xx y errores de red).
+    """
+    try:
+        yield
+    except anthropic.APITimeoutError as exc:
+        logger.warning("El LLM no respondió a tiempo: %s", exc)
+        raise LLMProviderError("El proveedor del LLM no respondió a tiempo.") from exc
+    except anthropic.APIConnectionError as exc:
+        logger.warning("No se pudo conectar con el LLM: %s", exc)
+        raise LLMProviderError("No se pudo conectar con el proveedor del LLM.") from exc
+    except anthropic.APIError as exc:
+        logger.warning("El LLM devolvió un error: %r", exc)
+        raise LLMProviderError("El proveedor del LLM devolvió un error.") from exc
 
 
 class LLMService:
@@ -45,7 +82,9 @@ class LLMService:
                     "como variable de entorno para poder responder preguntas."
                 )
             self._client = anthropic.Anthropic(
-                api_key=self._settings.anthropic_api_key
+                api_key=self._settings.anthropic_api_key,
+                timeout=self._settings.anthropic_timeout_seconds,
+                max_retries=self._settings.anthropic_max_retries,
             )
         return self._client
 
@@ -72,22 +111,33 @@ class LLMService:
 
         Returns:
             El texto de la respuesta generada por el modelo.
+
+        Raises:
+            LLMProviderError: si el proveedor falla o la respuesta no tiene texto.
         """
         client = self._get_client()
-        response = client.messages.create(
-            model=self._settings.anthropic_model,
-            max_tokens=self._settings.max_answer_tokens,
-            thinking={"type": "adaptive"},
-            system=_SYSTEM_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": self._build_user_message(pregunta, contexto),
-                }
-            ],
-        )
+        with _provider_errors():
+            response = client.messages.create(
+                model=self._settings.anthropic_model,
+                max_tokens=self._settings.max_answer_tokens,
+                thinking={"type": "adaptive"},
+                system=_SYSTEM_PROMPT,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": self._build_user_message(pregunta, contexto),
+                    }
+                ],
+            )
         # La respuesta puede incluir bloques de pensamiento antes del texto; nos
         # quedamos únicamente con los bloques de tipo "text".
-        return "".join(
+        texto = "".join(
             block.text for block in response.content if block.type == "text"
         ).strip()
+        if not texto:
+            logger.warning(
+                "El LLM devolvió una respuesta sin texto (stop_reason=%s).",
+                response.stop_reason,
+            )
+            raise LLMProviderError("El proveedor del LLM devolvió una respuesta vacía.")
+        return texto
